@@ -27,7 +27,6 @@ COPY core /workspace/core
 COPY miner /workspace/miner
 COPY trainer /workspace/trainer
 COPY scripts /workspace/scripts
-COPY validator /workspace/validator
 COPY core/config/* /workspace/axolotl/
 
 RUN chmod +x /workspace/scripts/run_image_trainer.sh

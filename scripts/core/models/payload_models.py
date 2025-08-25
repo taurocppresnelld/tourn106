@@ -1,8 +1,10 @@
+import ast
+import hashlib
 from datetime import datetime
 from uuid import UUID
 from uuid import uuid4
 
-from fiber.logging_utils import get_logger
+from logging_utils import get_logger
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
@@ -87,7 +89,6 @@ class TrainerTaskLog(TrainerProxyRequest):
     status: TaskStatus
     started_at: datetime | None
     finished_at: datetime | None
-    wandb_url: str | None = None
     logs: list[str] = []
 
 
@@ -252,18 +253,8 @@ class NewTaskRequestDPO(NewTaskRequest):
         return values
 
 
-class RewardFunctionReference(BaseModel):
-    """Model representing a reference to a reward function by ID"""
-
-    reward_id: str = Field(
-        ..., description="UUID of the reward function in the database", examples=["550e8400-e29b-41d4-a716-446655440000"]
-    )
-    reward_weight: float = Field(..., ge=0, description="Weight for this reward function")
-
-
 class NewTaskRequestGrpo(NewTaskRequest):
     field_prompt: str = Field(..., description="The column name for the prompt", examples=["prompt"])
-    extra_column: str | None = Field(None, description="The column name for the extra data", examples=["extra_data"])
 
     ds_repo: str = Field(..., description="The repository for the dataset", examples=["trl-lib/tldr"])
     file_format: FileFormat = Field(
@@ -271,7 +262,7 @@ class NewTaskRequestGrpo(NewTaskRequest):
     )
     model_repo: str = Field(..., description="The repository for the model", examples=["Qwen/Qwen2.5-Coder-32B-Instruct"])
 
-    reward_functions: list[RewardFunctionReference]
+    reward_functions: list[RewardFunction]
 
     # Turn off protected namespace for model
     model_config = ConfigDict(protected_namespaces=())
@@ -288,6 +279,44 @@ class NewTaskRequestGrpo(NewTaskRequest):
     def validate_reward_lists(self) -> "NewTaskRequestGrpo":
         if len(self.reward_functions) == 0:
             raise ValueError("reward_functions must not be empty")
+        return self
+
+    @model_validator(mode="after")
+    def validate_reward_functions(self) -> "NewTaskRequestGrpo":
+        for reward_function in self.reward_functions:
+            try:
+                # Check if it's valid Python code
+                parsed = ast.parse(reward_function.reward_func)
+
+                # Check if it contains a function definition
+                function_found = False
+                for node in ast.walk(parsed):
+                    if isinstance(node, ast.FunctionDef):
+                        function_found = True
+                        arg_names = [arg.arg for arg in node.args.args]
+                        has_completions = "completions" in arg_names
+                        has_kwargs = node.args.kwarg is not None
+
+                        if not has_completions:
+                            raise ValueError(f"Reward function {node.name} must have a 'completions' parameter")
+                        if not has_kwargs:
+                            raise ValueError(f"Reward function {node.name} must have a '**kwargs' parameter")
+
+                        if reward_function.is_generic is None:
+                            allowed_params = {"completions", "prompts"}
+                            reward_function.is_generic = set(arg_names) <= allowed_params
+
+                        if reward_function.func_hash is None:
+                            reward_function.func_hash = hashlib.sha256(reward_function.reward_func.encode()).hexdigest()
+
+                        break
+
+                if not function_found:
+                    raise ValueError("Each reward function must be a proper Python function")
+
+            except Exception as e:
+                raise ValueError(f"Invalid Python syntax: {reward_function.reward_func[:50]}... {e}")
+
         return self
 
 
@@ -452,51 +481,6 @@ class TournamentGpuRequirementsResponse(BaseModel):
     gpu_requirements: list[GpuRequirementSummary]
     total_tasks: int
     total_hours: float
-
-
-class BenchmarkResult(BaseModel):
-    """Individual benchmark result for a participant"""
-
-    copy_task_id: str
-    participant_hotkey: str
-    tournament_id: str | None
-    quality_score: float
-    test_loss: float | None
-    synth_loss: float | None
-    repo: str | None
-    completed_at: datetime | None
-    created_at: datetime
-    model_id: str
-    dataset: str
-    task_type: str
-
-
-class BenchmarkRootTaskResults(BaseModel):
-    """Results for a specific benchmark root task"""
-
-    root_task_id: str
-    model_id: str
-    dataset: str
-    task_type: str
-    results: list[BenchmarkResult]
-
-
-class RewardFunctionInfo(BaseModel):
-    reward_id: str = Field(..., description="UUID of the reward function in the database")
-    name: str
-    description: str
-    code: str
-
-
-class RewardFunctionsResponse(BaseModel):
-    reward_functions: dict[str, RewardFunctionInfo]
-
-
-class AddRewardFunctionRequest(BaseModel):
-    name: str
-    description: str
-    code: str
-    reward_weight: float | None = None
 
 
 # Type alias for task details types

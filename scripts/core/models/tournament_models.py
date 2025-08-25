@@ -3,13 +3,10 @@ from datetime import datetime
 from enum import Enum
 from uuid import UUID
 
-from fiber.chain.models import Node
 from pydantic import BaseModel
-from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import field_validator
 
-from core.models.payload_models import TrainingRepoResponse
 from core.models.utility_models import TaskType
 from core.models.utility_models import TrainingStatus
 from validator.core.constants import TOURNAMENT_DPO_GPU_MULTIPLIER
@@ -70,6 +67,7 @@ def generate_pair_id(round_id: str, pair_number: int) -> str:
 
 
 def get_tournament_gpu_requirement(task_type: TaskType, model_params_count: int) -> GpuRequirement:
+    return GpuRequirement.A100
     if task_type == TaskType.IMAGETASK:
         return GpuRequirement.A100
 
@@ -127,8 +125,6 @@ class TournamentParticipant(BaseModel):
     final_position: int | None = None
     training_repo: str | None = None
     training_commit_hash: str | None = None
-    stake_required: float | None = None
-    backup_repo: str | None = None
 
 
 class TournamentTask(BaseModel):
@@ -211,13 +207,6 @@ class TournamentResults(BaseModel):
     rounds: list[TournamentRoundResult]
 
 
-class TournamentResultsWithWinners(BaseModel):
-    tournament_id: str
-    rounds: list[TournamentRoundResult]
-    base_winner_hotkey: str | None = None
-    winner_hotkey: str | None = None
-
-
 class TournamentScore(BaseModel):
     hotkey: str
     score: float
@@ -227,38 +216,6 @@ class TournamentTypeResult(BaseModel):
     scores: list[TournamentScore]
     prev_winner_hotkey: str | None
     prev_winner_won_final: bool
-
-
-class TaskPerformanceDifference(BaseModel):
-    """Performance difference data for a single task"""
-    task_id: str
-    task_type: str
-    boss_score: float | None
-    challenger_score: float | None
-    threshold_used: float  # 0.05, 0.075, or 0.10
-    performance_difference: float | None  # Percentage difference (positive = challenger better)
-    challenger_won: bool
-
-
-class TournamentPerformanceData(BaseModel):
-    """Performance data for tournament vs sync comparison"""
-    tournament_task_id: str
-    synthetic_task_id: str
-    task_type: str
-    tournament_winner_score: float
-    best_synthetic_score: float
-    performance_difference: float  # Percentage difference (positive = tournament better)
-
-
-class TournamentBurnData(BaseModel):
-    """Data explaining emission burn calculation"""
-    text_performance_diff: float | None
-    image_performance_diff: float | None
-    weighted_average_diff: float
-    burn_proportion: float
-    tournament_weight: float
-    regular_weight: float
-    burn_weight: float
 
 
 class TournamentDetailsResponse(BaseModel):
@@ -272,17 +229,6 @@ class TournamentDetailsResponse(BaseModel):
     final_scores: list[TournamentScore]
     text_tournament_weight: float
     image_tournament_weight: float
-    boss_round_performance: list[TaskPerformanceDifference] | None = None
-    sync_performance: list[TournamentPerformanceData] | None = None
-
-
-class TournamentAuditData(BaseModel):
-    text_tournament_data: TournamentResultsWithWinners | None = None
-    image_tournament_data: TournamentResultsWithWinners | None = None
-    participants: list[str] = []
-    tournament_weight_multiplier: float = 0.0
-    regular_weight_multiplier: float = 0.0
-    burn_weight: float = 0.0
 
 
 class BossRoundTaskCompletion(BaseModel):
@@ -302,109 +248,3 @@ class TaskScore(BaseModel):
     test_loss: float
     synth_loss: float
     quality_score: float
-
-
-class RespondingNode(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    node: Node
-    training_repo_response: TrainingRepoResponse
-    boosted_stake: float
-    actual_stake: float
-
-
-class NextTournamentInfo(BaseModel):
-    tournament_type: TournamentType
-    next_start_date: datetime | None = None
-    next_end_date: datetime | None = None
-    interval_hours: int | None = None
-    current_round_number: int | None = None
-    tournament_status: str | None = None
-
-
-class NextTournamentDates(BaseModel):
-    text: NextTournamentInfo
-    image: NextTournamentInfo
-
-
-class ActiveTournamentParticipant(BaseModel):
-    hotkey: str
-    stake_requirement: float
-
-
-class ActiveTournamentInfo(BaseModel):
-    tournament_id: str
-    tournament_type: TournamentType
-    status: TournamentStatus
-    participants: list[ActiveTournamentParticipant]
-    created_at: datetime
-
-
-class ActiveTournamentsResponse(BaseModel):
-    text: ActiveTournamentInfo | None
-    image: ActiveTournamentInfo | None
-
-
-class LatestTournamentsDetailsResponse(BaseModel):
-    """Response for latest tournaments with burn data"""
-    text: TournamentDetailsResponse | None
-    image: TournamentDetailsResponse | None
-    burn_data: TournamentBurnData
-
-
-class TournamentHistoryEntry(BaseModel):
-    """Individual tournament entry for history response"""
-    tournament_id: str
-    tournament_type: TournamentType
-    status: TournamentStatus
-    winner_hotkey: str | None = None
-    base_winner_hotkey: str | None = None
-    created_at: datetime | None = None
-
-
-class TournamentHistoryResponse(BaseModel):
-    """Response for tournament history endpoint"""
-    tournaments: list[TournamentHistoryEntry]
-
-
-class BenchmarkTaskCopy(BaseModel):
-    """Raw benchmark task copy data from database"""
-    copy_task_id: str
-    root_task_id: str
-    participant_hotkey: str
-    tournament_id: str | None = None
-    created_at: datetime
-    task_type: TaskType
-    model_id: str
-    dataset: str
-    hours_to_complete: int
-    model_params_count: int
-    is_organic: bool
-    task_created_at: datetime | None = None
-
-
-class BenchmarkInstance(BaseModel):
-    """A single benchmark instance (copy task) with its results"""
-    copy_task_id: str
-    participant_hotkey: str
-    tournament_id: str
-    created_at: datetime
-    test_loss: float | None = None
-
-
-class BenchmarkTimeline(BaseModel):
-    """Timeline of benchmark results for a single root task"""
-    root_task_id: str
-    task_type: TaskType
-    model_id: str
-    dataset: str  
-    hours_to_complete: int
-    model_params_count: int
-    is_organic: bool
-    task_created_at: datetime | None = None
-    benchmarks: list[BenchmarkInstance] = Field(default_factory=list)
-
-
-class BenchmarkTimelineResponse(BaseModel):
-    """Response containing benchmark timelines for all tasks"""
-    timelines: list[BenchmarkTimeline]

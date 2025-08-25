@@ -100,6 +100,8 @@ async def run_trainer_container_image(
     model_type: str,
     expected_repo_name: str,
     hours_to_complete: float,
+    hotkey: str,
+    docker_labels: dict[str, str] | None = None,
     gpu_ids: list[int] = [0],
 ) -> Container:
     client: docker.DockerClient = docker.from_env()
@@ -123,7 +125,7 @@ async def run_trainer_container_image(
 
     # Calculate resources based on GPU count
     memory_limit, cpu_limit_nanocpus = calculate_container_resources(gpu_ids)
-    
+
     # Set shared memory size based on GPU count
     shm_size = "16g" if len(gpu_ids) >= 4 else "8g"
 
@@ -133,17 +135,18 @@ async def run_trainer_container_image(
             command=command,
             volumes={
                 cst.VOLUME_NAMES[0]: {"bind": cst.OUTPUT_CHECKPOINTS_PATH, "mode": "rw"},
-                cst.VOLUME_NAMES[1]: {"bind": cst.CACHE_ROOT_PATH, "mode": "rw"},
+                cst.VOLUME_NAMES[1]: {"bind": cst.CACHE_ROOT_PATH, "mode": "ro"},
             },
             remove=False,
             shm_size=shm_size,
             name=container_name,
+            labels=docker_labels,
             mem_limit=memory_limit,
             nano_cpus=cpu_limit_nanocpus,
             device_requests=[docker.types.DeviceRequest(device_ids=[str(i) for i in gpu_ids], capabilities=[["gpu"]])],
             security_opt=["no-new-privileges"],
             cap_drop=["ALL"],
-            network_mode="none",
+            network_mode="bridge",  # Changed from "none" to allow log shipping
             environment={"TRANSFORMERS_CACHE": cst.HUGGINGFACE_CACHE_PATH},
             detach=True,
         )
@@ -166,6 +169,7 @@ async def run_trainer_container_text(
     file_format: FileFormat,
     expected_repo_name: str,
     hours_to_complete: float,
+    docker_labels: dict[str, str] | None = None,
     gpu_ids: list[int] = [0],
 ) -> Container:
     client: docker.DockerClient = docker.from_env()
@@ -195,7 +199,7 @@ async def run_trainer_container_text(
 
     # Calculate resources based on GPU count
     memory_limit, cpu_limit_nanocpus = calculate_container_resources(gpu_ids)
-    
+
     # Set shared memory size based on GPU count
     shm_size = "16g" if len(gpu_ids) >= 4 else "8g"
 
@@ -205,18 +209,19 @@ async def run_trainer_container_text(
             command=command,
             volumes={
                 cst.VOLUME_NAMES[0]: {"bind": cst.OUTPUT_CHECKPOINTS_PATH, "mode": "rw"},
-                cst.VOLUME_NAMES[1]: {"bind": cst.CACHE_ROOT_PATH, "mode": "rw"},
+                cst.VOLUME_NAMES[1]: {"bind": cst.CACHE_ROOT_PATH, "mode": "ro"},
             },
             remove=False,
             shm_size=shm_size,
             name=container_name,
+            labels=docker_labels,
             mem_limit=memory_limit,
             nano_cpus=cpu_limit_nanocpus,
             device_requests=[docker.types.DeviceRequest(device_ids=[str(i) for i in gpu_ids], capabilities=[["gpu"]])],
             security_opt=["no-new-privileges"],
             cap_drop=["ALL"],
             detach=True,
-            network_mode="none",
+            network_mode="bridge",  # Changed from "none" to allow log shipping
             environment=environment,
         )
 
@@ -243,7 +248,9 @@ def run_downloader_container(
     model: str,
     dataset_url: str,
     task_type: TaskType,
+    hotkey: str,
     file_format: FileFormat | None = None,
+    docker_labels: dict[str, str] | None = None,
 ) -> tuple[int, Exception | None]:
     client = docker.from_env()
 
@@ -269,6 +276,7 @@ def run_downloader_container(
             image=cst.TRAINER_DOWNLOADER_DOCKER_IMAGE,
             name=container_name,
             command=command,
+            labels=docker_labels,
             volumes={cst.VOLUME_NAMES[1]: {"bind": "/cache", "mode": "rw"}},
             remove=False,
             detach=True,
@@ -310,9 +318,11 @@ async def upload_repo_to_hf(
     expected_repo_name: str,
     huggingface_token: str,
     huggingface_username: str,
+    docker_labels: dict[str, str] | None = None,
     wandb_token: str | None = None,
     path_in_repo: str | None = None,
 ):
+    container = None
     try:
         client = docker.from_env()
 
@@ -336,12 +346,21 @@ async def upload_repo_to_hf(
 
         container_name = f"hf-upload-{uuid.uuid4().hex}"
 
+        # Docker labels for log collection
+        labels = {
+            "task_id": task_id,
+            "hotkey": hotkey,
+            "trainer_type": "uploader",
+            "expected_repo": expected_repo_name,
+        }
+
         logger.info(f"Starting upload container {container_name} for task {task_id}...")
 
         container = client.containers.run(
             image=cst.HF_UPLOAD_DOCKER_IMAGE,
             environment=environment,
             volumes=volumes,
+            labels=labels,
             detach=True,
             remove=False,
             name=container_name,
@@ -370,6 +389,17 @@ async def upload_repo_to_hf(
     except Exception as e:
         logger.exception(f"Unexpected error during upload_repo_to_hf for task {task_id}: {e}")
         raise
+
+    finally:
+        if container:
+            try:
+                container.reload()
+                if container.status == "running":
+                    container.kill()
+                container.remove(force=True)
+                logger.info(f"Upload container {container.name} cleaned up successfully.")
+            except Exception as cleanup_err:
+                logger.warning(f"Failed to remove upload container {container.name if container else 'unknown'}: {cleanup_err}")
 
 
 def get_task_type(request: TrainerProxyRequest) -> TaskType:
@@ -403,6 +433,19 @@ async def start_training_task(task: TrainerProxyRequest, local_repo_path: str):
         training_data.hours_to_complete = int(training_data.hours_to_complete)
         await create_volumes_if_dont_exist()
 
+        docker_labels = {
+            "task_id": training_data.task_id,
+            "hotkey": task.hotkey,
+            "model": training_data.model,
+            "task_type": task_type,
+            "expected_repo": training_data.expected_repo_name,
+            **(
+                {"dataset_type": str(training_data.dataset_type)}
+                if getattr(training_data, "dataset_type", None) is not None
+                else {}
+            ),
+        }
+
         dockerfile_path = (
             f"{local_repo_path}/{cst.DEFAULT_IMAGE_DOCKERFILE_PATH}"
             if task_type == TaskType.IMAGETASK
@@ -418,7 +461,9 @@ async def start_training_task(task: TrainerProxyRequest, local_repo_path: str):
             model=training_data.model,
             dataset_url=training_data.dataset_zip if task_type == TaskType.IMAGETASK else training_data.dataset,
             task_type=task_type,
+            hotkey=task.hotkey,
             file_format=getattr(training_data, "file_format", None),
+            docker_labels=docker_labels,
         )
 
         if download_status == 0:
@@ -455,6 +500,8 @@ async def start_training_task(task: TrainerProxyRequest, local_repo_path: str):
                     model_type=training_data.model_type,
                     expected_repo_name=training_data.expected_repo_name,
                     hours_to_complete=training_data.hours_to_complete,
+                    hotkey=task.hotkey,
+                    docker_labels=docker_labels,
                     gpu_ids=task.gpu_ids,
                 ),
                 timeout=60,
@@ -472,6 +519,7 @@ async def start_training_task(task: TrainerProxyRequest, local_repo_path: str):
                     file_format=training_data.file_format,
                     expected_repo_name=training_data.expected_repo_name,
                     hours_to_complete=training_data.hours_to_complete,
+                    docker_labels=docker_labels,
                     gpu_ids=task.gpu_ids,
                 ),
                 timeout=60,
@@ -539,6 +587,7 @@ async def start_training_task(task: TrainerProxyRequest, local_repo_path: str):
                     expected_repo_name=training_data.expected_repo_name,
                     huggingface_username=os.getenv("HUGGINGFACE_USERNAME"),
                     huggingface_token=os.getenv("HUGGINGFACE_TOKEN"),
+                    docker_labels=docker_labels,
                     wandb_token=wandb_token,
                     path_in_repo=path_in_repo,
                 )

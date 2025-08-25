@@ -2,11 +2,6 @@ base_model: NousResearch/Meta-Llama-3-8B-Instruct
 model_type: AutoModelForCausalLM
 tokenizer_type: AutoTokenizer
 
-dataloader_num_workers: 12
-
-max_grad_norm: 1
-
-
 load_in_8bit: false
 load_in_4bit: false
 strict: false
@@ -14,56 +9,55 @@ strict: false
 chat_template: llama3
 datasets:
 dataset_prepared_path:
-val_set_size: 0.0
+val_set_size: 0.05
 output_dir: miner_id_24
 
-sequence_len: 1024
+rl: grpo
+
+trl:
+  beta: 0.04
+  max_completion_length: 256
+  use_vllm: False
+  num_generations: 4
+
+sequence_len: 512
 sample_packing: false
 pad_to_sequence_len: true
 trust_remote_code: true
 
 adapter: lora
 lora_model_dir:
-lora_r: 64
-lora_alpha: 128
-lora_dropout: 0.15
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
 lora_target_linear: true
 lora_fan_in_fan_out:
 
-loraplus_lr_embedding: 1.0e-06
-loraplus_lr_ratio: 16
-
-gradient_accumulation_steps: 2
-micro_batch_size: 2
-num_epochs: 200
-
-optimizer: adamw_torch_fused
-
+gradient_accumulation_steps: 4
+micro_batch_size: 4
+num_epochs: 1
+optimizer: adamw_bnb_8bit
 lr_scheduler: cosine
-learning_rate: 0.0001
+learning_rate: 0.0002
 
 train_on_inputs: false
 group_by_length: false
 bf16: auto
 fp16:
-tf32: true
+tf32: false
 
 gradient_checkpointing: false
 early_stopping_patience:
-eval_steps:
-save_steps: 300
-
-
 resume_from_checkpoint:
 local_rank:
-logging_steps:
+logging_steps: 1
 xformers_attention:
 flash_attention: true
 s2_attention:
 
 wandb_project: Gradients-On-Demand
 wandb_entity:
-wandb_mode: offline
+wandb_mode: online
 wandb_run: your_name
 wandb_runid: default
 
@@ -73,15 +67,14 @@ hub_strategy: checkpoint
 hub_token:
 
 
-saves_per_epoch: 0
-save_total_limit: 10
-warmup_steps: 150
-evals_per_epoch:
+saves_per_epoch: 4
+warmup_steps: 10
+evals_per_epoch: 4
 eval_table_size:
 eval_max_new_tokens: 128
-max_steps: 1500
+max_steps: 10
 debug:
 deepspeed:
-weight_decay: 0
+weight_decay: 0.0
 fsdp:
 fsdp_config:
